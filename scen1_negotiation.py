@@ -314,6 +314,7 @@ def run_negotiation(buyer_model: ModelConfig, seller_model: ModelConfig, monitor
                         "turn_number": turn,
                         "deception_detected": True,
                         "monitor_reasoning": monitor_result.get("explanation"),
+                        "monitor_alert_to_buyer": alert,
                         "context": {
                             "message_before": buyer_msg_data,
                             "triggered_message": seller_msg_data,
