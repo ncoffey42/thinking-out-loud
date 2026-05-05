@@ -257,13 +257,6 @@ def _openrouter_chat(config: ModelConfig, messages: list[dict]) -> LLMResponse:
         retry_msg = retry_data["choices"][0]["message"]
         content = retry_msg.get("content", "") or ""
 
-    if (
-        reasoning
-        and config.openrouter_reasoning_tokens > 0
-        and _reasoning_trim_enabled()
-    ):
-        reasoning = _trim_to_approx_tokens(reasoning, config.openrouter_reasoning_tokens)
-
     return LLMResponse(content=content.strip(), reasoning=reasoning)
 
 
@@ -318,15 +311,6 @@ def _openrouter_retry_empty_content_enabled() -> bool:
     }
 
 
-def _reasoning_trim_enabled() -> bool:
-    return os.getenv("TRUNCATE_REASONING_TO_BUDGET", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-
-
 def _with_openrouter_reasoning_instruction(messages: list[dict], token_budget: int) -> list[dict]:
     if token_budget <= 0:
         return messages
@@ -356,29 +340,6 @@ def _with_final_only_instruction(messages: list[dict]) -> list[dict]:
         return adjusted
 
     return [{"role": "system", "content": instruction}, *adjusted]
-
-
-def _trim_to_approx_tokens(text: str, token_budget: int) -> str:
-    """Clamp returned reasoning when a provider ignores a requested reasoning budget.
-
-    This is intentionally conservative and tokenizer-free. It treats words,
-    punctuation runs, and whitespace-preserved chunks as approximate tokens,
-    which is good enough for keeping logs/context from ballooning.
-    """
-    if token_budget <= 0:
-        return ""
-
-    chunks = re.findall(r"\S+\s*", text)
-    if len(chunks) <= token_budget:
-        return text
-
-    trimmed = "".join(chunks[:token_budget]).rstrip()
-    omitted = len(chunks) - token_budget
-    return (
-        f"{trimmed}\n\n"
-        f"[Reasoning truncated locally to approximately {token_budget} tokens; "
-        f"provider returned about {omitted} additional tokens despite the requested budget.]"
-    )
 
 
 def _ensure_llama_server(config: ModelConfig) -> ModelConfig:

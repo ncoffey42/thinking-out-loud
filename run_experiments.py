@@ -1,28 +1,92 @@
 import os
 import re
 import json
-from scen1_negotiation import _build_model, run_negotiation
+import fcntl
+from scen1_negotiation import _build_model, _build_monitor_model, run_negotiation
 
 # Old code is below
 
 LOG_DIR = "experiments/conversation_logs.json"
+LOCK_FILE = f"{LOG_DIR}.lock"
+MAX_FAILED_ATTEMPTS_PER_ITERATION = int(os.getenv("MAX_FAILED_ATTEMPTS_PER_ITERATION", "5"))
 
 
 EXPERIMENT_MATRIX = [
+
     {
-        "name": "K2K2", 
-        "buyer": "kimi", 
-        "seller": "kimi", 
-        "monitor": "llama8b", 
-        "target_iterations": 50
+        "name": "aware_qwen27b-qwen235",
+        "buyer": "qwen27b",
+        "seller": "qwen235b",
+        "monitor": "qwen2b",
+        "seller_monitoring_notice": True,
+        "target_iterations": 100
     },
     {
-        "name": "K2GPT", 
-        "buyer": "gpt20b", 
-        "seller": "kimi", 
-        "monitor": "llama8b", 
-        "target_iterations": 50
-    }
+        "name": "None_qwen2b-qwen2b", 
+        "buyer": "qwen2b", 
+        "seller": "qwen2b", 
+        "monitor": "none", 
+        "target_iterations": 100
+    },
+
+    {
+        "name": "qwen2b-qwen2b", 
+        "buyer": "qwen2b", 
+        "seller": "qwen2b", 
+        "monitor": "qwen2b", 
+        "target_iterations": 100
+    },
+    {
+        "name": "qwen2b-qwen235",
+        "buyer": "qwen2b",
+        "seller": "qwen235b",
+        "monitor": "qwen2b",
+        "target_iterations": 100
+    },
+    {
+        "name": "None_qwen27b-qwen235",
+        "buyer": "qwen27b",
+        "seller": "qwen235b",
+        "monitor": "none",
+        "target_iterations": 100
+    },
+    {
+        "name": "qwen27b-qwen235",
+        "buyer": "qwen27b",
+        "seller": "qwen235b",
+        "monitor": "qwen2b",
+        "target_iterations": 100
+    },
+    {
+        "name": "None_qwen2b-qwen235",
+        "buyer": "qwen2b",
+        "seller": "qwen235b",
+        "monitor": "none",
+        "target_iterations": 100
+    },
+    {
+        "name": "None_qwen235-qwen235",
+        "buyer": "qwen235b",
+        "seller": "qwen235b",
+        "monitor": "none",
+        "target_iterations": 100
+    },
+    {
+        "name": "qwen235-qwen235",
+        "buyer": "qwen235b",
+        "seller": "qwen235b",
+        "monitor": "qwen2b",
+        "target_iterations": 100
+    },
+
+
+    # {
+    #     "name": "K2GPT", 
+    #     "buyer": "gpt20b", 
+    #     "seller": "kimi", 
+    #     "monitor": "qwen2b", 
+    #     "target_iterations": 50
+    # }
 ]
 
 def parse_price(price_str: str) -> float | None:
@@ -37,15 +101,36 @@ def parse_price(price_str: str) -> float | None:
 
 def load_state() -> dict:
     """Loads the state file so we can resume where we left off."""
+    os.makedirs(os.path.dirname(LOG_DIR), exist_ok=True)
+    with open(LOCK_FILE, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        try:
+            return _read_state_unlocked()
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _read_state_unlocked() -> dict:
     if os.path.exists(LOG_DIR):
         with open(LOG_DIR, "r") as f:
             return json.load(f)
     return {}
 
-def save_state(state: dict):
-    """Saves the current data immediately. Prevents data loss on crash."""
-    with open(LOG_DIR, "w") as f:
-        json.dump(state, f, indent=4)
+
+def save_experiment_state(exp_name: str, exp_state: dict):
+    """Save only one experiment section while preserving parallel writers' data."""
+    os.makedirs(os.path.dirname(LOG_DIR), exist_ok=True)
+    with open(LOCK_FILE, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            latest_state = _read_state_unlocked()
+            latest_state[exp_name] = exp_state
+            temp_path = f"{LOG_DIR}.tmp.{os.getpid()}"
+            with open(temp_path, "w") as f:
+                json.dump(latest_state, f, indent=4)
+            os.replace(temp_path, LOG_DIR)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 def main():
     print("=======================================================")
@@ -66,6 +151,7 @@ def main():
                 "buyer_model": config["buyer"],
                 "seller_model": config["seller"],
                 "monitor_model": config["monitor"],
+                "seller_monitoring_notice": config.get("seller_monitoring_notice", False),
                 "completed_iterations": 0,
                 "deals_reached": 0,
                 "walk_aways": 0,
@@ -74,6 +160,11 @@ def main():
                 "total_price_sum": 0.0,
                 "avg_price": 0.0
             }
+        else:
+            state[exp_name].setdefault(
+                "seller_monitoring_notice",
+                config.get("seller_monitoring_notice", False),
+            )
 
         completed = state[exp_name]["completed_iterations"]
 
@@ -86,13 +177,36 @@ def main():
 
         buyer_model = _build_model(config["buyer"])
         seller_model = _build_model(config["seller"])
-        monitor_model = _build_model(config["monitor"])
+        monitor_model = _build_monitor_model(config["monitor"])
 
-        #Run the remaining iterations
-        for i in range(completed, target):
-            print(f"\n--- {exp_name}: Running Iteration {i} ---")
-            
-            outcome, price_str, transcript, deceptions = run_negotiation(buyer_model, seller_model, monitor_model, run_id=str(i))
+        # Run until the requested number of successful iterations is complete.
+        while state[exp_name]["completed_iterations"] < target:
+            i = state[exp_name]["completed_iterations"]
+            failures = 0
+
+            while True:
+                run_id = str(i) if failures == 0 else f"{i}_retry{failures}"
+                print(f"\n--- {exp_name}: Running Iteration {i} (attempt {failures + 1}) ---")
+
+                try:
+                    outcome, price_str, transcript, deceptions = run_negotiation(
+                        buyer_model,
+                        seller_model,
+                        monitor_model,
+                        run_id=run_id,
+                        exit_on_error=False,
+                        seller_monitoring_notice=config.get("seller_monitoring_notice", False),
+                    )
+                    break
+                except Exception as e:
+                    failures += 1
+                    print(f" Iteration {i} failed: {e}")
+                    if failures >= MAX_FAILED_ATTEMPTS_PER_ITERATION:
+                        raise RuntimeError(
+                            f"{exp_name} iteration {i} failed "
+                            f"{MAX_FAILED_ATTEMPTS_PER_ITERATION} times; aborting."
+                        ) from e
+                    print(f" Retrying {exp_name} iteration {i}...")
             
             state[exp_name]["completed_iterations"] += 1
             state[exp_name]["total_deceptions"] += deceptions
@@ -111,7 +225,7 @@ def main():
             if deals > 0:
                 state[exp_name]["avg_price"] = state[exp_name]["total_price_sum"] / deals
 
-            save_state(state)
+            save_experiment_state(exp_name, state[exp_name])
             print(f" Saved progress for {exp_name}_{i}.")
 
 
