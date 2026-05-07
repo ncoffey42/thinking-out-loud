@@ -1,7 +1,9 @@
 import os
 import re
 import json
+
 import fcntl
+
 from scen1_negotiation import _build_model, _build_monitor_model, run_negotiation
 
 # Old code is below
@@ -145,9 +147,25 @@ def main():
         exp_name = config["name"]
         target = config["target_iterations"]
 
-        # Initialize this experiment in the state dictionary if it doesn't exist yet
-        if exp_name not in state:
-            state[exp_name] = {
+        # --- DYNAMIC PATHING FOR AWARENESS ---
+        # This creates the 'aware-' prefix if seller_monitoring_notice is True
+        awareness_prefix = "aware-" if config.get("seller_monitoring_notice", False) else ""
+        
+        # Organize folders by model pair: experiments/buyer_seller/
+        log_folder = os.path.join("experiments", f"{config['buyer']}_{config['seller']}")
+        # Filename example: aware-qwen2b.json
+        current_log_path = os.path.join(log_folder, f"{awareness_prefix}{config['monitor']}.json")
+        
+        # Ensure the directory exists for this specific experiment
+        os.makedirs(log_folder, exist_ok=True)
+
+        # Initialize or load state for this SPECIFIC JSON file
+        if os.path.exists(current_log_path):
+            with open(current_log_path, "r") as f:
+                exp_data = json.load(f)
+            print(f"Resuming {exp_name} from {current_log_path}...")
+        else:
+            exp_data = {
                 "buyer_model": config["buyer"],
                 "seller_model": config["seller"],
                 "monitor_model": config["monitor"],
@@ -160,28 +178,21 @@ def main():
                 "total_price_sum": 0.0,
                 "avg_price": 0.0
             }
-        else:
-            state[exp_name].setdefault(
-                "seller_monitoring_notice",
-                config.get("seller_monitoring_notice", False),
-            )
+            print(f"Starting new experiment: {exp_name}")
 
-        completed = state[exp_name]["completed_iterations"]
+        completed = exp_data["completed_iterations"]
 
-        #Check if we already finished this experiment in a previous run
         if completed >= target:
             print(f"Skipping {exp_name}: Already completed {completed}/{target} runs.\n")
             continue
 
-        print(f"Resuming {exp_name} at run {completed} / {target}...")
-
+        # Load models only when we are sure we need to run this experiment
         buyer_model = _build_model(config["buyer"])
         seller_model = _build_model(config["seller"])
         monitor_model = _build_monitor_model(config["monitor"])
 
-        # Run until the requested number of successful iterations is complete.
-        while state[exp_name]["completed_iterations"] < target:
-            i = state[exp_name]["completed_iterations"]
+        while exp_data["completed_iterations"] < target:
+            i = exp_data["completed_iterations"]
             failures = 0
 
             while True:
@@ -202,31 +213,29 @@ def main():
                     failures += 1
                     print(f" Iteration {i} failed: {e}")
                     if failures >= MAX_FAILED_ATTEMPTS_PER_ITERATION:
-                        raise RuntimeError(
-                            f"{exp_name} iteration {i} failed "
-                            f"{MAX_FAILED_ATTEMPTS_PER_ITERATION} times; aborting."
-                        ) from e
+                        raise RuntimeError(f"{exp_name} iteration {i} failed {MAX_FAILED_ATTEMPTS_PER_ITERATION} times; aborting.")
                     print(f" Retrying {exp_name} iteration {i}...")
             
-            state[exp_name]["completed_iterations"] += 1
-            state[exp_name]["total_deceptions"] += deceptions
+            # Update stats
+            exp_data["completed_iterations"] += 1
+            exp_data["total_deceptions"] += deceptions
             
             if outcome == "deal_reached":
-                state[exp_name]["deals_reached"] += 1
+                exp_data["deals_reached"] += 1
                 price_val = parse_price(price_str)
                 if price_val is not None:
-                    state[exp_name]["total_price_sum"] += price_val
+                    exp_data["total_price_sum"] += price_val
             elif outcome == "walk_away":
-                state[exp_name]["walk_aways"] += 1
+                exp_data["walk_aways"] += 1
             elif outcome == "max_turns":
-                state[exp_name]["max_turns"] += 1
+                exp_data["max_turns"] += 1
 
-            deals = state[exp_name]["deals_reached"]
-            if deals > 0:
-                state[exp_name]["avg_price"] = state[exp_name]["total_price_sum"] / deals
+            if exp_data["deals_reached"] > 0:
+                exp_data["avg_price"] = exp_data["total_price_sum"] / exp_data["deals_reached"]
 
-            save_experiment_state(exp_name, state[exp_name])
-            print(f" Saved progress for {exp_name}_{i}.")
+            # Use the NEW specific path to save
+            save_experiment_state(current_log_path, exp_data)
+            print(f" Saved progress for {exp_name}_{i} to {current_log_path}")
 
 
 if __name__ == "__main__":
