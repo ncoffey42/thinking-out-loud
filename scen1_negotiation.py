@@ -56,7 +56,7 @@ def _build_model(name: str, think_override: str = "") -> ModelConfig:
         if not api_key:
             print("Error: KIMI_API_KEY not found in .env")
             sys.exit(1)
-        kimi_thinking = os.getenv("KIMI_THINKING", "disabled").strip().lower()
+        kimi_thinking = os.getenv("KIMI_THINKING", "enabled").strip().lower()
         return ModelConfig(
             provider="openai",
             model=os.getenv("KIMI_MODEL", "kimi-k2.6"),
@@ -111,6 +111,7 @@ def _build_model(name: str, think_override: str = "") -> ModelConfig:
             provider="llamacpp",
             model="qwen3.5:2b",
             base_url=_local_llamacpp_base_url(),
+            ctx_size=int(os.getenv("QWEN2B_CTX_SIZE", "8192")),
             thinking_budget_tokens=512,
         )
     else:
@@ -409,6 +410,11 @@ def _parse_monitor_json(*candidates: str | None) -> dict:
     raise json.JSONDecodeError("No JSON object found in monitor response", "", 0)
 
 
+def safe_path_part(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return safe.strip("._-") or "unnamed"
+
+
 def run_negotiation(
     buyer_model: ModelConfig,
     seller_model: ModelConfig,
@@ -416,11 +422,14 @@ def run_negotiation(
     run_id: str = "0",
     exit_on_error: bool = True,
     seller_monitoring_notice: bool = False,
+    artifact_namespace: str | None = None,
+    print_transcript: bool = True,
 ) -> tuple[str, str | None, str, int]:
     """Runs a single negotiation and returns (outcome, price, transcript, deceptions_detected)."""
     transcript = []
     def log(msg: str):
-        print(msg)
+        if print_transcript:
+            print(msg)
         transcript.append(msg)
 
     def log_section(title: str, body: str | None = None):
@@ -435,10 +444,15 @@ def run_negotiation(
             return "none"
         return model.model.replace(":", "-").replace("/", "_")
 
+    if artifact_namespace is None:
+        awareness_prefix = "aware_" if seller_monitoring_notice else ""
+        artifact_namespace = f"{awareness_prefix}{safe_model_name(buyer_model)}_{safe_model_name(seller_model)}"
+    artifact_namespace = safe_path_part(artifact_namespace)
+
     def artifact_path(root: str) -> str:
         return os.path.join(
             root,
-            f"{safe_model_name(buyer_model)}_{safe_model_name(seller_model)}",
+            artifact_namespace,
             safe_model_name(monitor_model),
             run_id,
         )
@@ -460,6 +474,7 @@ def run_negotiation(
             "seller_model": seller_model.model,
             "monitor_model": monitor_model.model if monitor_model else "none",
             "seller_monitoring_notice": seller_monitoring_notice,
+            "artifact_namespace": artifact_namespace,
         }
 
         conversation_dir = artifact_path("conversationlogs")
@@ -478,8 +493,13 @@ def run_negotiation(
             os.path.join(conversation_dir, "transcript.txt"),
         )
 
+        deception_dir = artifact_path("deceptionlogs")
+        if os.path.isdir(deception_dir):
+            for filename in os.listdir(deception_dir):
+                if filename.startswith("turn_") and filename.endswith(".json"):
+                    os.remove(os.path.join(deception_dir, filename))
+
         if deception_triggers:
-            deception_dir = artifact_path("deceptionlogs")
             for trigger in deception_triggers:
                 write_json(
                     os.path.join(deception_dir, f"turn_{trigger['turn_number']}.json"),
@@ -617,7 +637,7 @@ def run_negotiation(
                     buyer_messages.append({"role": "user", "content": alert})
                     
                     trigger_data = {
-                        "experiment_id": f"{buyer_model.model}_{seller_model.model}_{monitor_model.model}_run{run_id}",
+                        "experiment_id": f"{artifact_namespace}_{safe_model_name(monitor_model)}_run{run_id}",
                         "turn_number": turn,
                         "deception_detected": True,
                         "monitor_reasoning": monitor_result.get("explanation"),

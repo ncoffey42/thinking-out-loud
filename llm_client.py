@@ -170,6 +170,8 @@ def _openai_chat(config: ModelConfig, messages: list[dict]) -> LLMResponse:
     if _is_kimi_k2_model(config.model):
         if config.disable_thinking:
             payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["thinking"] = {"type": "enabled"}
     elif config.think:
         payload["reasoning_effort"] = config.think
 

@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 import json
@@ -15,71 +16,83 @@ MAX_FAILED_ATTEMPTS_PER_ITERATION = int(os.getenv("MAX_FAILED_ATTEMPTS_PER_ITERA
 
 EXPERIMENT_MATRIX = [
 
-    {
-        "name": "aware_qwen27b-qwen235",
-        "buyer": "qwen27b",
-        "seller": "qwen235b",
-        "monitor": "qwen2b",
-        "seller_monitoring_notice": True,
-        "target_iterations": 100
-    },
-    {
-        "name": "None_qwen2b-qwen2b", 
-        "buyer": "qwen2b", 
-        "seller": "qwen2b", 
-        "monitor": "none", 
-        "target_iterations": 100
-    },
+    # {
+    #     "name": "qwen27b-qwen235",
+    #     "buyer": "qwen27b",
+    #     "seller": "qwen235b",
+    #     "monitor": "qwen2b",
+    #     "target_iterations": 100
+    # },
 
     {
-        "name": "qwen2b-qwen2b", 
-        "buyer": "qwen2b", 
-        "seller": "qwen2b", 
-        "monitor": "qwen2b", 
-        "target_iterations": 100
-    },
-    {
-        "name": "qwen2b-qwen235",
-        "buyer": "qwen2b",
-        "seller": "qwen235b",
+        "name": "kimi26-kimi26",
+        "buyer": "kimi",
+        "seller": "kimi",
         "monitor": "qwen2b",
-        "target_iterations": 100
-    },
-    {
-        "name": "None_qwen27b-qwen235",
-        "buyer": "qwen27b",
-        "seller": "qwen235b",
-        "monitor": "none",
-        "target_iterations": 100
-    },
-    {
-        "name": "qwen27b-qwen235",
-        "buyer": "qwen27b",
-        "seller": "qwen235b",
-        "monitor": "qwen2b",
-        "target_iterations": 100
-    },
-    {
-        "name": "None_qwen2b-qwen235",
-        "buyer": "qwen2b",
-        "seller": "qwen235b",
-        "monitor": "none",
-        "target_iterations": 100
-    },
-    {
-        "name": "None_qwen235-qwen235",
-        "buyer": "qwen235b",
-        "seller": "qwen235b",
-        "monitor": "none",
-        "target_iterations": 100
-    },
-    {
-        "name": "qwen235-qwen235",
-        "buyer": "qwen235b",
-        "seller": "qwen235b",
-        "monitor": "qwen2b",
-        "target_iterations": 100
-    },
+        "seller_monitoring_notice": False,
+        "target_iterations": 100,
+    }
+
+
+    # {
+    #     "name": "aware_qwen27b-qwen235",
+    #     "aliases": ["qaware_qwen27b-qwen235"],
+    #     "buyer": "qwen27b",
+    #     "seller": "qwen235b",
+    #     "monitor": "qwen2b",
+    #     "seller_monitoring_notice": True,
+    #     "target_iterations": 100
+    # },
+
+
+    # {
+    #     "name": "None_qwen27b-qwen235",
+    #     "buyer": "qwen27b",
+    #     "seller": "qwen235b",
+    #     "monitor": "none",
+    #     "target_iterations": 100
+    # },
+    
+
+    # {
+    #     "name": "None_qwen2b-qwen2b", 
+    #     "buyer": "qwen2b", 
+    #     "seller": "qwen2b", 
+    #     "monitor": "none", 
+    #     "target_iterations": 100
+    # },
+
+    # {
+    #     "name": "qwen2b-qwen2b", 
+    #     "buyer": "qwen2b", 
+    #     "seller": "qwen2b", 
+    #     "monitor": "qwen2b", 
+    #     "target_iterations": 100
+    # },
+    # {
+    #     "name": "qwen2b-qwen235",
+    #     "buyer": "qwen2b",
+    #     "seller": "qwen235b",
+    #     "monitor": "qwen2b",
+    #     "target_iterations": 100
+    # },
+
+   
+    # {
+    #     "name": "None_qwen2b-qwen235",
+    #     "buyer": "qwen2b",
+    #     "seller": "qwen235b",
+    #     "monitor": "none",
+    #     "target_iterations": 100
+    # },
+
+    # {
+    #     "name": "qwen235-qwen235",
+    #     "buyer": "qwen235b",
+    #     "seller": "qwen235b",
+    #     "monitor": "qwen2b",
+    #     "target_iterations": 100
+    # },
 
 
     # {
@@ -119,13 +132,96 @@ def _read_state_unlocked() -> dict:
     return {}
 
 
-def save_experiment_state(exp_name: str, exp_state: dict):
+def init_experiment_data(config: dict) -> dict:
+    return {
+        "buyer_model": config["buyer"],
+        "seller_model": config["seller"],
+        "monitor_model": config["monitor"],
+        "seller_monitoring_notice": config.get("seller_monitoring_notice", False),
+        "completed_iterations": 0,
+        "deals_reached": 0,
+        "walk_aways": 0,
+        "max_turns": 0,
+        "total_deceptions": 0,
+        "total_price_sum": 0.0,
+        "avg_price": 0.0,
+    }
+
+
+def legacy_state_key(config: dict) -> str:
+    awareness_prefix = "aware-" if config.get("seller_monitoring_notice", False) else ""
+    log_folder = os.path.join("experiments", f"{config['buyer']}_{config['seller']}")
+    return os.path.join(log_folder, f"{awareness_prefix}{config['monitor']}.json")
+
+
+def state_entry_matches_config(entry: dict, config: dict) -> bool:
+    return (
+        entry.get("buyer_model") == config["buyer"]
+        and entry.get("seller_model") == config["seller"]
+        and entry.get("monitor_model") == config["monitor"]
+        and bool(entry.get("seller_monitoring_notice", False))
+        == bool(config.get("seller_monitoring_notice", False))
+    )
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run negotiation experiment batches.")
+    parser.add_argument(
+        "--experiments",
+        nargs="+",
+        help="Only run these experiment names. Use names from EXPERIMENT_MATRIX.",
+    )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Restart selected experiments from iteration 0.",
+    )
+    parser.add_argument(
+        "--target-iterations",
+        type=int,
+        help="Override target_iterations for selected experiments.",
+    )
+    return parser.parse_args(argv)
+
+
+def selected_experiments(args: argparse.Namespace) -> list[dict]:
+    if not args.experiments:
+        configs = [dict(config) for config in EXPERIMENT_MATRIX]
+    else:
+        requested = set(args.experiments)
+        configs = [
+            dict(config)
+            for config in EXPERIMENT_MATRIX
+            if config["name"] in requested or requested.intersection(config.get("aliases", []))
+        ]
+        found = {
+            requested_name
+            for config in configs
+            for requested_name in (config["name"], *config.get("aliases", []))
+            if requested_name in requested
+        }
+        missing = sorted(requested - found)
+        if missing:
+            raise SystemExit(f"Unknown experiment name(s): {', '.join(missing)}")
+
+    if args.target_iterations is not None:
+        for config in configs:
+            config["target_iterations"] = args.target_iterations
+
+    return configs
+
+
+def save_experiment_state(exp_name: str, exp_state: dict, config: dict | None = None):
     """Save only one experiment section while preserving parallel writers' data."""
     os.makedirs(os.path.dirname(LOG_DIR), exist_ok=True)
     with open(LOCK_FILE, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             latest_state = _read_state_unlocked()
+            if config is not None:
+                for key, value in list(latest_state.items()):
+                    if key != exp_name and isinstance(value, dict) and state_entry_matches_config(value, config):
+                        latest_state.pop(key)
             latest_state[exp_name] = exp_state
             temp_path = f"{LOG_DIR}.tmp.{os.getpid()}"
             with open(temp_path, "w") as f:
@@ -134,50 +230,32 @@ def save_experiment_state(exp_name: str, exp_state: dict):
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
-def main():
+def main(argv: list[str] | None = None):
+    args = parse_args(argv)
     print("=======================================================")
     print("  STARTING LARGE-SCALE NEGOTIATION EXPERIMENT PIPELINE ")
     print("=======================================================\n")
 
     # 1. Load existing progress
     state = load_state()
+    configs = selected_experiments(args)
 
     # 2. Iterate through the experiment matrix
-    for config in EXPERIMENT_MATRIX:
+    for config in configs:
         exp_name = config["name"]
         target = config["target_iterations"]
 
-        # --- DYNAMIC PATHING FOR AWARENESS ---
-        # This creates the 'aware-' prefix if seller_monitoring_notice is True
-        awareness_prefix = "aware-" if config.get("seller_monitoring_notice", False) else ""
-        
-        # Organize folders by model pair: experiments/buyer_seller/
-        log_folder = os.path.join("experiments", f"{config['buyer']}_{config['seller']}")
-        # Filename example: aware-qwen2b.json
-        current_log_path = os.path.join(log_folder, f"{awareness_prefix}{config['monitor']}.json")
-        
-        # Ensure the directory exists for this specific experiment
-        os.makedirs(log_folder, exist_ok=True)
-
-        # Initialize or load state for this SPECIFIC JSON file
-        if os.path.exists(current_log_path):
-            with open(current_log_path, "r") as f:
-                exp_data = json.load(f)
-            print(f"Resuming {exp_name} from {current_log_path}...")
+        if args.reset:
+            exp_data = init_experiment_data(config)
+            print(f"Resetting experiment: {exp_name}")
+        elif exp_name in state:
+            exp_data = state[exp_name]
+            print(f"Resuming {exp_name} from {LOG_DIR}...")
+        elif legacy_state_key(config) in state:
+            exp_data = state[legacy_state_key(config)]
+            print(f"Migrating legacy state for {exp_name} from {legacy_state_key(config)}...")
         else:
-            exp_data = {
-                "buyer_model": config["buyer"],
-                "seller_model": config["seller"],
-                "monitor_model": config["monitor"],
-                "seller_monitoring_notice": config.get("seller_monitoring_notice", False),
-                "completed_iterations": 0,
-                "deals_reached": 0,
-                "walk_aways": 0,
-                "max_turns": 0,
-                "total_deceptions": 0,
-                "total_price_sum": 0.0,
-                "avg_price": 0.0
-            }
+            exp_data = init_experiment_data(config)
             print(f"Starting new experiment: {exp_name}")
 
         completed = exp_data["completed_iterations"]
@@ -207,6 +285,7 @@ def main():
                         run_id=run_id,
                         exit_on_error=False,
                         seller_monitoring_notice=config.get("seller_monitoring_notice", False),
+                        artifact_namespace=exp_name,
                     )
                     break
                 except Exception as e:
@@ -233,9 +312,8 @@ def main():
             if exp_data["deals_reached"] > 0:
                 exp_data["avg_price"] = exp_data["total_price_sum"] / exp_data["deals_reached"]
 
-            # Use the NEW specific path to save
-            save_experiment_state(current_log_path, exp_data)
-            print(f" Saved progress for {exp_name}_{i} to {current_log_path}")
+            save_experiment_state(exp_name, exp_data, config)
+            print(f" Saved progress for {exp_name}_{i} to {LOG_DIR}")
 
 
 if __name__ == "__main__":
